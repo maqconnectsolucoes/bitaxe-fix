@@ -108,9 +108,11 @@ Baixe `esp-miner.bin` e `www.bin` das [releases do ESP-Miner](https://github.com
 
 ## Código-fonte
 
-O firmware é derivado do ESP-Miner, licenciado sob **GPL-3.0**. O upstream está em https://github.com/bitaxeorg/ESP-Miner.
+O firmware é derivado do ESP-Miner, licenciado sob **GPL-3.0**.
 
-Para obter o código-fonte correspondente a estes binários, abra uma [issue](../../issues).
+**Fonte correspondente a estes binários:** https://github.com/maqconnectsolucoes/bitaxe-fix-src
+
+Upstream oficial: https://github.com/bitaxeorg/ESP-Miner
 
 ## Aviso
 
