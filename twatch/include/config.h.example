@@ -1,0 +1,33 @@
+#pragma once
+
+// Credenciais e endereços. Este arquivo de EXEMPLO é o único versionado —
+// copie para config.h (ignorado pelo git) e preencha com valores reais antes
+// de compilar. Nunca edite este arquivo com dados verdadeiros.
+
+#define WIFI_SSID "your-wifi-ssid"
+#define WIFI_PASS "your-wifi-password"
+
+// IPv4 explícito, não mDNS. Ver nota sobre o header Origin em bitaxe_fetch.cpp.
+#define BITAXE_HOST "192.168.1.100"
+
+// Segundo Bitaxe, opcional. Vazio = um dispositivo so.
+#define BITAXE_HOST2 ""
+
+#define WIFI_CONNECT_TIMEOUT_MS 8000
+#define HTTP_TIMEOUT_MS 4000
+#define BATTERY_MIN_PERCENT 15
+#define NTP_SERVER "pool.ntp.org"
+
+// Semente do primeiro boot. Depois que o portal gravar no NVS, estes valores
+// deixam de ser consultados — só voltam a valer se o NVS for apagado.
+#define TZ_MINUTES (-180)     // -180 = UTC-3, horario de Brasilia
+#define IDLE_RELOGIO_MS 5000
+#define IDLE_PAINEL_MS 15000
+
+// Brilho por tela, em porcentagem. O relogio fica mais escuro de proposito.
+#define BRIGHTNESS_CLOCK 40
+#define BRIGHTNESS_PANEL 100
+
+// Vigia periodica em minutos. 0 = desligada (padrao: e o unico recurso que
+// gasta bateria sem o usuario pedir).
+#define WATCH_INTERVAL_MIN 0

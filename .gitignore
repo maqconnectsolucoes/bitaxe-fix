@@ -1,0 +1,16 @@
+# Artefatos de build do ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+build_log*.txt
+
+# Frontend
+main/http_server/axe-os/node_modules/
+main/http_server/axe-os/dist/
+main/http_server/axe-os/.angular/
+
+# Editor / SO
+.vscode/
+.cache/
+.DS_Store

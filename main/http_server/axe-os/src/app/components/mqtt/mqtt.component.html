@@ -1,0 +1,157 @@
+<form [formGroup]="form" *ngIf="form">
+    <div class="card">
+        <h2 class="mb-3 text-main">MQTT Telemetry</h2>
+
+        <p class="text-secondary mb-4">
+            Publishes this device's telemetry to an external MQTT broker over TLS, so the numbers
+            leave the local network without opening a port on the router. Mining never depends on
+            the broker: if it is unreachable, hashing carries on and publishing resumes on its own.
+        </p>
+
+        <div class="flex flex-col gap-4">
+            <!-- Enabled -->
+            <div class="flex flex-col md:flex-row md:items-center gap-2">
+                <label htmlFor="mqttEnabled" class="w-full md:w-2/12 font-medium cursor-pointer select-none">
+                    <tooltip-text-icon
+                        text="Enabled"
+                        tooltip="Publish telemetry to the broker. When off, the device makes no outbound MQTT connection at all."
+                    />
+                </label>
+                <div class="w-full md:w-10/12 flex items-center">
+                    <app-checkbox name="mqttEnabled" inputId="mqttEnabled" formControlName="mqttEnabled" [binary]="true"></app-checkbox>
+                </div>
+            </div>
+
+            <!-- Device identifier -->
+            <div class="flex flex-col md:flex-row md:items-center gap-2">
+                <label htmlFor="mqttDeviceId" class="w-full md:w-2/12 font-medium">
+                    <tooltip-text-icon
+                        text="Identificação"
+                        tooltip="Identificador único desta Bitaxe no broker. Vem preenchido com um padrão derivado do MAC e pode ser editado."
+                    />
+                </label>
+                <div class="w-full md:w-10/12">
+                    <input class="input-text" id="mqttDeviceId" formControlName="mqttDeviceId" type="text" autocomplete="off" />
+                    <small *ngIf="form.get('mqttDeviceId')?.errors?.['pattern']" class="block text-red-500 mt-1">
+                        Use apenas letras, números e <code>. _ - :</code> &mdash; sem <code>/</code>, <code>+</code>, <code>#</code> ou espaços.
+                    </small>
+                    <small *ngIf="form.get('mqttDeviceId')?.errors?.['required']" class="block text-red-500 mt-1">
+                        A identificação não pode ficar vazia.
+                    </small>
+                    <small class="block text-secondary mt-1">
+                        Publica em <code>{{ topic }}</code>
+                    </small>
+                </div>
+            </div>
+
+            <!-- Host -->
+            <div class="flex flex-col md:flex-row md:items-center gap-2">
+                <label htmlFor="mqttHost" class="w-full md:w-2/12 font-medium">Broker</label>
+                <div class="w-full md:w-10/12">
+                    <input class="input-text" id="mqttHost" formControlName="mqttHost" sensitive-data type="text"
+                        placeholder="mqtt.exemplo.com" autocomplete="off" />
+                    <small *ngIf="form.get('mqttHost')?.errors?.['invalidHostname']" class="block text-red-500 mt-1">
+                        Enter a hostname or IPv4 address only &mdash; no scheme and no port.
+                    </small>
+                    <small *ngIf="form.get('mqttHost')?.errors?.['required'] && form.get('mqttHost')?.dirty" class="block text-red-500 mt-1">
+                        A broker address is required while MQTT is enabled.
+                    </small>
+                </div>
+            </div>
+
+            <!-- Port -->
+            <div class="flex flex-col md:flex-row md:items-center gap-2">
+                <label htmlFor="mqttPort" class="w-full md:w-2/12 font-medium">Port</label>
+                <div class="w-full md:w-10/12">
+                    <input class="input-text" id="mqttPort" formControlName="mqttPort" type="number" min="1" max="65535" />
+                    <small *ngIf="form.get('mqttPort')?.invalid && form.get('mqttPort')?.dirty" class="block text-red-500 mt-1">
+                        Enter a port between 1 and 65535 (8883 for TLS).
+                    </small>
+                </div>
+            </div>
+
+            <!-- User -->
+            <div class="flex flex-col md:flex-row md:items-center gap-2">
+                <label htmlFor="mqttUser" class="w-full md:w-2/12 font-medium">User</label>
+                <div class="w-full md:w-10/12">
+                    <input class="input-text" id="mqttUser" formControlName="mqttUser" sensitive-data type="text" autocomplete="off" />
+                </div>
+            </div>
+
+            <!-- Password -->
+            <div class="flex flex-col md:flex-row md:items-center gap-2">
+                <label htmlFor="mqttPass" class="w-full md:w-2/12 font-medium">Password</label>
+                <div class="w-full md:w-10/12">
+                    <div class="relative w-full">
+                        <input class="input-text pr-10" id="mqttPass" formControlName="mqttPass"
+                            [type]="showPassword ? 'text' : 'password'" autocomplete="off" />
+                        <span *ngIf="form.get('mqttPass')?.dirty" class="absolute inset-y-0 right-0 flex items-center pr-3 cursor-pointer text-secondary hover:text-main"
+                              (click)="showPassword = !showPassword">
+                            <i class="pi {{!showPassword ? 'pi-eye' : 'pi-eye-slash'}}"></i>
+                        </span>
+                    </div>
+                    <small class="block text-secondary mt-1">
+                        Leave the asterisks untouched to keep the password already stored.
+                    </small>
+                </div>
+            </div>
+
+            <!-- CA certificate -->
+            <div class="flex flex-col md:flex-row md:items-start gap-2">
+                <label htmlFor="mqttCaCert" class="w-full md:w-2/12 font-medium pt-2">
+                    <tooltip-text-icon
+                        text="CA Certificate"
+                        tooltip="PEM certificate authority used to verify the broker. Leave empty to use a broker whose certificate is signed by a public CA."
+                    />
+                </label>
+                <div class="w-full md:w-10/12">
+                    <div class="flex items-stretch">
+                        <textarea
+                            id="mqttCaCert"
+                            formControlName="mqttCaCert"
+                            rows="6"
+                            class="w-full p-2 text-sm font-mono bg-transparent text-main border border-surface rounded-l outline-none focus:border-primary"
+                            placeholder="Enter or choose a certificate file (.pem, .crt, .cer)"></textarea>
+                        <span class="flex items-center px-3 border border-l-0 border-surface bg-bg-hover rounded-r">
+                            <button
+                                type="button"
+                                class="btn btn-secondary border-none px-3"
+                                appTooltip="Choose a certificate file"
+                                tooltipPosition="top"
+                                (click)="certFileInput.click()">
+                                <i class="pi pi-upload"></i>
+                            </button>
+                            <input #certFileInput type="file" (change)="onCertFileSelected($event)"
+                                class="hidden" accept=".pem,.crt,.cer" />
+                        </span>
+                    </div>
+                    <small *ngIf="form.get('mqttCaCert')?.errors?.['invalidCertificate']" class="block text-red-500 mt-1">
+                        Please enter a valid SSL/TLS certificate
+                    </small>
+                </div>
+            </div>
+
+            <!-- Interval -->
+            <div class="flex flex-col md:flex-row md:items-center gap-2">
+                <label htmlFor="mqttInterval" class="w-full md:w-2/12 font-medium">
+                    <tooltip-text-icon
+                        text="Interval (s)"
+                        tooltip="Seconds between telemetry publishes. The payload carries the same numbers as /api/system/info."
+                    />
+                </label>
+                <div class="w-full md:w-10/12">
+                    <input class="input-text" id="mqttInterval" formControlName="mqttInterval" type="number" min="5" max="3600" />
+                    <small *ngIf="form.get('mqttInterval')?.invalid && form.get('mqttInterval')?.dirty" class="block text-red-500 mt-1">
+                        Enter an interval between 5 and 3600 seconds.
+                    </small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Save / Restart Action Buttons -->
+        <div class="flex mt-5 gap-3">
+            <button [disabled]="!form.dirty || form.invalid" (click)="updateSystem()" class="btn">Save</button>
+            <button [disabled]="!savedChanges" (click)="restart()" class="btn" [class.btn-secondary]="!savedChanges">Restart</button>
+        </div>
+    </div>
+</form>

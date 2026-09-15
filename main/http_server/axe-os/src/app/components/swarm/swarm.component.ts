@@ -1,0 +1,743 @@
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
+import { Component, OnDestroy, OnInit, ViewChild, HostListener } from '@angular/core';
+import { FormBuilder, FormGroup, Validators, FormControl } from '@angular/forms';
+import { ToastrService } from 'ngx-toastr';
+import { EMPTY, forkJoin, fromEvent, catchError, distinctUntilChanged, from, map, mergeMap, of, startWith, switchMap, take, timeout, timer, toArray, Observable, Subscription } from 'rxjs';
+import { LocalStorageService } from 'src/app/local-storage.service';
+import { LayoutService } from "../../layout/service/app.layout.service";
+import { SystemApiService } from 'src/app/services/system.service';
+import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
+import { ModalComponent } from '../modal/modal.component';
+import { addressValidator } from 'src/app/validators/address.validator';
+import { parseSuffixString } from 'src/app/utils/suffix';
+
+const SWARM_DATA = 'SWARM_DATA';
+const SWARM_VERSION = 'SWARM_VERSION';
+const SWARM_REFRESH_TIME = 'SWARM_REFRESH_TIME';
+const SWARM_SORTING = 'SWARM_SORTING';
+const SWARM_GRID_VIEW = 'SWARM_GRID_VIEW';
+
+// Devices queried in parallel (2 requests each). The device serving AxeOS has
+// max_open_sockets=20 with LRU purge: the old 128 (256 sockets) evicted the live
+// WebSocket of the very session running the scan.
+const SCAN_CONCURRENCY = 16;
+const REFRESH_CONCURRENCY = 6;
+
+// The scan covers the /24 of the serving device.
+const SCAN_SUBNET_MASK = '255.255.255.0';
+
+
+type SwarmDevice = { 
+  address: string; 
+  ASICModel: string; 
+  deviceModel: string; 
+  swarmColor: string; 
+  asicCount: number; 
+  displayName?: string; 
+  connectionAddress?: string; 
+  [key: string]: any 
+};
+
+@Component({
+    selector: 'app-swarm',
+    templateUrl: './swarm.component.html',
+    styleUrls: ['./swarm.component.scss'],
+    standalone: false
+})
+export class SwarmComponent implements OnInit, OnDestroy {
+
+  @ViewChild(ModalComponent) modalComponent!: ModalComponent;
+
+  // filteredSwarm/deviceFamilies are recomputed only when the swarm or the
+  // filter changes (see recomputeViews), not on every change-detection pass.
+  private _swarm: any[] = [];
+  public filteredSwarm: any[] = [];
+  public deviceFamilies: any[] = [];
+
+  get swarm(): any[] {
+    return this._swarm;
+  }
+
+  set swarm(value: any[]) {
+    this._swarm = value;
+    this.recomputeViews();
+  }
+
+  public selectedAxeOs: any = null;
+
+  public form: FormGroup;
+
+  public scanning = false;
+
+  private countdownSubscription?: Subscription;
+  private refreshIntervalSubscription?: Subscription;
+  public refreshIntervalTime = 30;
+  public refreshTimeSet = 30;
+
+  public totals: { hashRate: number; power: number; bestDiff: number } = { hashRate: 0, power: 0, bestDiff: 0 };
+
+  public isRefreshing = false;
+
+  public refreshIntervalControl: FormControl;
+
+  public gridView: boolean;
+  public selectedSort: { sortField: string; sortDirection: 'asc' | 'desc' };
+
+  public staticMenuDesktopInactive: boolean;
+  private staticMenuDesktopSubscription!: Subscription;
+
+  private _filterText = '';
+
+  get filterText(): string {
+    return this._filterText;
+  }
+
+  set filterText(value: string) {
+    this._filterText = value ?? '';
+    this.recomputeViews();
+  }
+
+  public currentDeviceIp: string | null = null;
+  private currentDeviceVersion: string | null = null;
+
+  public isSortDropdownOpen = false;
+
+  getSelectedSortLabel(): string {
+    const selected = this.sortOptions.find(opt => opt.value.sortField === this.selectedSort.sortField && opt.value.sortDirection === this.selectedSort.sortDirection);
+    return selected ? selected.label : 'Sort';
+  }
+
+  selectSortOption(value: {sortField: string; sortDirection: string}) {
+    this.selectedSort = {
+      sortField: value.sortField,
+      sortDirection: value.sortDirection as 'asc' | 'desc'
+    };
+    this.sortBy(value.sortField, this.selectedSort.sortDirection);
+  }
+
+  @HostListener('document:keydown.esc', ['$event'])
+  onEscKey() {
+    if (this.filterText) {
+      this.filterText = '';
+    }
+  }
+
+  constructor(
+    private fb: FormBuilder,
+    private toastr: ToastrService,
+    private localStorageService: LocalStorageService,
+    public layoutService: LayoutService,
+    private systemService: SystemApiService,
+    private httpClient: HttpClient
+  ) {
+
+    this.form = this.fb.group({
+      manualAddAddress: [null, [Validators.required, addressValidator]]
+    });
+
+    this.gridView = this.localStorageService.getBool(SWARM_GRID_VIEW);
+
+    const storedRefreshTime = this.localStorageService.getNumber(SWARM_REFRESH_TIME) ?? 30;
+    this.refreshIntervalTime = storedRefreshTime;
+    this.refreshTimeSet = storedRefreshTime;
+    this.refreshIntervalControl = new FormControl(storedRefreshTime);
+
+    this.refreshIntervalSubscription = this.refreshIntervalControl.valueChanges.subscribe(value => {
+      this.refreshIntervalTime = value;
+      this.refreshTimeSet = value;
+      this.localStorageService.setNumber(SWARM_REFRESH_TIME, value);
+    });
+
+
+    this.selectedSort = this.localStorageService.getObject(SWARM_SORTING) ?? {
+      sortField: 'address',
+      sortDirection: 'asc'
+    };
+
+    this.staticMenuDesktopInactive = this.layoutService.state.staticMenuDesktopInactive;
+  }
+
+  ngOnInit(): void {
+    this.staticMenuDesktopSubscription = this.layoutService.getStaticMenuDesktopInactive$()
+      .subscribe(inactive => {
+        this.staticMenuDesktopInactive = inactive;
+      });
+
+    // Countdown only ticks while the tab is visible (same pattern as the
+    // scoreboard polling): no refresh traffic from a backgrounded tab.
+    const visibility$ = fromEvent(document, 'visibilitychange').pipe(
+      map(() => document.visibilityState),
+      startWith(document.visibilityState),
+      distinctUntilChanged()
+    );
+    this.countdownSubscription = visibility$.pipe(
+      switchMap(state => state === 'visible' ? timer(1000, 1000) : EMPTY)
+    ).subscribe(() => {
+      if (!this.scanning && !this.isRefreshing && this.swarm.length) {
+        this.refreshIntervalTime--;
+        if (this.refreshIntervalTime <= 0) {
+          this.refreshList(false);
+        }
+      }
+    });
+
+    this.httpClient.get(`http://${window.location.hostname}/api/system/info`).subscribe({
+      next: (response: any) => {
+        this.currentDeviceIp = this.deviceIpv4(response) ?? null;
+        this.currentDeviceVersion = response.version;
+        this.initSwarm(response.version);
+      },
+      error: () => {
+        this.currentDeviceIp = null;
+        this.currentDeviceVersion = null;
+        this.initSwarm(null);
+      }
+    });
+  }
+
+  private initSwarm(firmwareVersion: string | null) {
+    const swarmData = this.localStorageService.getObject(SWARM_DATA);
+    const storedVersion = this.localStorageService.getItem(SWARM_VERSION);
+
+    const versionMatch = firmwareVersion && storedVersion === firmwareVersion;
+
+    if (swarmData == null || !versionMatch) {
+      if (swarmData != null && !versionMatch) {
+        this.localStorageService.removeItem(SWARM_DATA);
+      }
+      if (!firmwareVersion) {
+        this.localStorageService.removeItem(SWARM_VERSION);
+      }
+      this.scanNetwork();
+    } else {
+      this.swarm = swarmData;
+      this.refreshList(true);
+    }
+  }
+
+  ngOnDestroy(): void {
+    this.staticMenuDesktopSubscription.unsubscribe();
+    this.countdownSubscription?.unsubscribe();
+    this.refreshIntervalSubscription?.unsubscribe();
+    this.form.reset();
+  }
+
+  private saveSwarmData() {
+    // Cache is only used to redraw the list before the next refreshList() completes, so it
+    // doesn't need the peer's full SystemInfo payload persisted to localStorage indefinitely.
+    // Drop fields that reveal more about the user's network/pool than the UI needs cached.
+    const sanitized = this.swarm.map(device => {
+      const { ssid, stratumUser, fallbackStratumUser, macAddr, wifiStatus, wifiRSSI, ...rest } = device as any;
+      return rest;
+    });
+    this.localStorageService.setObject(SWARM_DATA, sanitized);
+    if (this.currentDeviceVersion) {
+      this.localStorageService.setItem(SWARM_VERSION, this.currentDeviceVersion);
+    }
+  }
+
+  private ipToInt(ip: string): number {
+    return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
+  }
+
+private isIpAddress(value: string): boolean {
+    const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+    return ipRegex.test(value);
+  }
+
+  // Utility method to get the display name for a device
+  public getDeviceDisplayName(device: SwarmDevice): string {
+    return device.displayName || device.address;
+  }
+
+  // refreshList()/scanNetwork() replace `swarm` with freshly-merged device objects on every
+  // tick; without trackBy, Angular tears down and rebuilds every card/row in the whole list
+  // instead of patching changed fields.
+  trackByAddress(_index: number, device: SwarmDevice): string {
+    return device.connectionAddress || device.address;
+  }
+
+  // Utility method to get the link URL for a device
+  // Follows the current device's access method (IP, hostname.local, or bare hostname)
+  public getDeviceLink(device: SwarmDevice): string {
+    const currentHost = window.location.hostname;
+    const isIP = this.isIpAddress(currentHost);
+    if (isIP) {
+      // Accessing via IP — link to device IP
+      return device['ipv4'] || device.connectionAddress || device.address || '';
+    }
+    if (currentHost.endsWith('.local')) {
+      // Accessing via mDNS — link to device's .local hostname
+      return device['fullHostname'] || device.connectionAddress || device.address || '';
+    }
+    // Accessing via bare hostname — link to device's bare hostname
+    return device['hostname'] || device.connectionAddress || device.address || '';
+  }
+
+  private intToIp(int: number): string {
+    return `${(int >>> 24) & 255}.${(int >>> 16) & 255}.${(int >>> 8) & 255}.${int & 255}`;
+  }
+
+  private calculateIpRange(ip: string, netmask: string): { start: number, end: number } {
+    const ipInt = this.ipToInt(ip);
+    const netmaskInt = this.ipToInt(netmask);
+    const network = ipInt & netmaskInt;
+    const broadcast = network | ~netmaskInt;
+    return { start: network + 1, end: broadcast - 1 };
+  }
+
+  scanNetwork() {
+    this.scanning = true;
+
+    if (this.isIpAddress(window.location.hostname)) {
+      // Direct IP access - scan the subnet
+      const { start, end } = this.calculateIpRange(window.location.hostname, SCAN_SUBNET_MASK);
+      const ips = Array.from({ length: end - start + 1 }, (_, i) => this.intToIp(start + i));
+      this.performNetworkScan(ips);
+    } else {
+      // mDNS hostname - fetch server IP first, then scan its subnet
+      this.httpClient.get(`http://${window.location.hostname}/api/system/info`)
+        .subscribe({
+          next: (response: any) => {
+            const serverIp = this.deviceIpv4(response);
+            if (!serverIp) {
+              this.scanning = false;
+              return;
+            }
+            const { start, end } = this.calculateIpRange(serverIp, SCAN_SUBNET_MASK);
+            const ips = Array.from({ length: end - start + 1 }, (_, i) => this.intToIp(start + i));
+            this.performNetworkScan(ips);
+          },
+          error: () => {
+            // Fallback: skip scanning if we can't get the IP
+            this.scanning = false;
+          }
+        });
+    }
+  }
+
+  private performNetworkScan(ips: string[]) {
+    this.getAllDeviceInfo(ips, () => of(null)).subscribe({
+      next: (result) => {
+        // Filter out null items first
+        const validResults = result.filter((item): item is SwarmDevice => item !== null);
+        // Merge new results with existing swarm entries
+        const existingAddresses = new Set([...this.swarm.map(item => item.address), ...this.swarm.map(item => item.connectionAddress)]);
+        const newItems = validResults.filter(item => {
+          const isDuplicate = existingAddresses.has(item['hostname']) || existingAddresses.has(item['ipv4']);
+          return !isDuplicate;
+        });
+        this.swarm = [...this.swarm, ...newItems];
+        this.sortSwarm();
+        this.saveSwarmData();
+        this.calculateTotals();
+      },
+      error: (err) => {
+        // Per-device errors are already swallowed above; this only fires on a
+        // programming error, but it must not leave the "Scanning" state stuck.
+        console.error('Network scan failed', err);
+        this.toastr.error('Network scan failed.');
+        this.scanning = false;
+        this.refreshIntervalTime = this.refreshTimeSet;
+      },
+      complete: () => {
+        this.scanning = false;
+        this.refreshIntervalTime = this.refreshTimeSet;
+      }
+    });
+  }
+
+  // Device IP field names differ per firmware:
+  //   AxeOS    -> `ipv4`   on /api/system/info
+  //   NerdOS   -> `hostip` on /api/system/info
+  //   Bitforge -> `staIp`  on /api/ap/info (see fetchDeviceIpv4)
+  private deviceIpv4(...sources: any[]): string | undefined {
+    for (const source of sources) {
+      const ipv4 = source?.['ipv4'] || source?.['hostip'] || source?.['staIp'];
+      if (ipv4) return ipv4;
+    }
+    return undefined;
+  }
+
+  // Bitforge doesn't report the station IP on /api/system/info at all, so fall
+  // back to its /api/ap/info endpoint before giving up on the device.
+  private fetchDeviceIpv4(address: string, info: any): Observable<string | undefined> {
+    const ipv4 = this.deviceIpv4(info);
+    if (ipv4) {
+      return of(ipv4);
+    }
+    return this.httpClient.get(`http://${address}/api/ap/info`).pipe(
+      timeout(3000),
+      map((ap: any) => this.deviceIpv4(ap)),
+      catchError(() => of(undefined))
+    );
+  }
+
+  private getAllDeviceInfo(addresses: string[], errorHandler: (error: any, address: string) => Observable<SwarmDevice[] | null>, fetchAsic: boolean = true, concurrency: number = SCAN_CONCURRENCY) {
+    return from(addresses).pipe(
+      mergeMap(address => forkJoin({
+        info: this.httpClient.get(`http://${address}/api/system/info`).pipe(catchError(() => of(null))),
+        asic: fetchAsic ? this.httpClient.get(`http://${address}/api/system/asic`).pipe(catchError(() => of({}))) : of({})
+      }).pipe(
+        mergeMap(({ info, asic }) => info === null
+          ? of(null)
+          : this.fetchDeviceIpv4(address, info).pipe(map(ipv4 => ({ info, asic, ipv4 })))
+        ),
+        map(bundle => {
+          if (bundle === null) {
+            return null;
+          }
+          const { info, asic, ipv4 } = bundle;
+
+          const existingDevice = this.swarm.find(device => device.connectionAddress === address);
+          const result = {
+            address: (info as any)['fullHostname'] || (info as any)['hostname'] || address,
+            displayName: (info as any)['hostname'] ? (info as any)['hostname'].replace(/\.local$/i, '') : address,
+            connectionAddress: address,
+            ...(existingDevice ? existingDevice : {}),
+            ...info,
+            ...asic,
+            ...this.numerizeDeviceBestDiffs(info as ISystemInfo),
+            ipv4: ipv4 ?? existingDevice?.['ipv4']
+          };
+          return this.fallbackDeviceModel(result);
+        }),
+        timeout(5000),
+        catchError(error => errorHandler(error, address))
+      ),
+        concurrency
+      ),
+      toArray()
+    ).pipe(take(1));
+  }
+
+  public add() {
+    const address = this.form.value.manualAddAddress;
+
+    forkJoin({
+      info: this.httpClient.get<any>(`http://${address}/api/system/info`).pipe(catchError(error => {
+        if (error.status === 401 || error.status === 0) {
+          this.toastr.warning(`Potential swarm peer detected at ${address} - upgrade its firmware to be able to add it.`);
+          return of({ _corsError: 401 });
+        }
+        throw error;
+      })),
+      asic: this.httpClient.get<any>(`http://${address}/api/system/asic`).pipe(catchError(() => of({})))
+    }).subscribe({
+      next: ({ info, asic }) => {
+      if ((info as any)._corsError === 401) {
+        return; // Already showed warning
+      }
+      if (!info.ASICModel || !asic.ASICModel) {
+        return;
+      }
+
+      if (this.swarm.some(item => item.connectionAddress === info['ipv4'])) {
+        this.toastr.warning('Device already added to the swarm.', `Device at ${address}`);
+        return;
+      }
+
+      const device = {
+        address: info['fullHostname'] || info['hostname'] || address,
+        displayName: info['hostname'] ? info['hostname'].replace(/\.local$/i, '') : address,
+        connectionAddress: info['ipv4'] || address,
+        ...asic,
+        ...info,
+        ...this.numerizeDeviceBestDiffs(info)
+      };
+      this.swarm = [...this.swarm, device];
+      this.sortSwarm();
+      this.saveSwarmData();
+      this.calculateTotals();
+      },
+      error: (err: HttpErrorResponse) => {
+        this.toastr.error(`Could not add device at ${address}. ${err.message}`);
+      }
+    });
+  }
+
+  public edit(device: any) {
+    this.selectedAxeOs = device;
+    this.modalComponent.isVisible = true;
+  }
+
+  public postAction(device: any, action: string) {
+    this.httpClient.post(`http://${device.connectionAddress}/api/system/${action}`, {}, { responseType: 'text' }).pipe(
+      timeout(800),
+      catchError(error => {
+        if ((action === 'restart' || action === 'identify') && (error.status === 200 || error.status === 0 || error.name === 'HttpErrorResponse' || error.statusText === 'Unknown Error')) {
+          if (action === 'restart') {
+            return of('System will restart shortly');
+          } else {
+            return of('Identify signal sent - device should say "Hi!"');
+          }
+        }
+        let errorMsg = `Failed to ${action} device at ${this.getDeviceDisplayName(device)}`;
+        if (error.name === 'TimeoutError') {
+          errorMsg = 'Request timed out';
+        } else if (error.message) {
+          errorMsg += `: ${error.message}`;
+        }
+        this.toastr.error(errorMsg, `Device at ${this.getDeviceDisplayName(device)}`);
+        return of(null);
+      })
+    ).subscribe((res: any) => {
+      if (res !== null) {
+        let message = res;
+        try { message = JSON.parse(res)?.message ?? res; } catch {}
+        this.toastr.success(message, `Device at ${this.getDeviceDisplayName(device)}`);
+        this.refreshList(false);
+      }
+    });
+  }
+
+  public remove(device: any) {
+    this.swarm = this.swarm.filter(axe => axe.address !== device.address);
+    this.saveSwarmData();
+    this.calculateTotals();
+  }
+
+  public refreshErrorHandler = (error: any, address: string) => {
+    const errorMessage = error?.message || error?.statusText || error?.toString() || 'Unknown error';
+    this.toastr.error(`Failed to get info: ${errorMessage}`, `Device at ${address}`);
+    const existingDevice = this.swarm.find(axeOs => axeOs.connectionAddress === address);
+    return of({
+      ...existingDevice,
+      address: existingDevice?.address || address,
+      connectionAddress: address,
+      ASICModel: existingDevice?.ASICModel || '',
+      deviceModel: existingDevice?.deviceModel || 'Other',
+      swarmColor: existingDevice?.swarmColor || 'gray',
+      asicCount: existingDevice?.asicCount || 1,
+      hashRate: 0,
+      sharesAccepted: 0,
+      power: 0,
+      voltage: 0,
+      temp: 0,
+      bestDiff: 0,
+      version: '',
+      uptimeSeconds: 0,
+      poolDifficulty: 0,
+    });
+  };
+
+  public refreshList(fetchAsic: boolean = true) {
+    if (this.scanning) {
+      return;
+    }
+
+    this.refreshIntervalTime = this.refreshTimeSet;
+    const addresses = this.swarm.filter(Boolean).map(axeOs => axeOs.connectionAddress);
+    this.isRefreshing = true;
+
+    this.getAllDeviceInfo(addresses, this.refreshErrorHandler, fetchAsic, REFRESH_CONCURRENCY).subscribe({
+      next: (result) => {
+        this.swarm = result;
+        this.sortSwarm();
+        this.saveSwarmData();
+        this.calculateTotals();
+        this.isRefreshing = false;
+      },
+      complete: () => {
+        this.isRefreshing = false;
+      }
+    });
+  }
+
+  sortBy(sortField: string, sortDirection?: 'asc' | 'desc' | undefined) {
+    if (sortDirection) {
+      this.selectedSort = { sortField, sortDirection };
+    } else if (this.selectedSort.sortField === sortField) {
+      this.selectedSort = { sortField, sortDirection: this.selectedSort.sortDirection === 'asc' ? 'desc' : 'asc' };
+    } else {
+      this.selectedSort = { sortField, sortDirection: 'asc' };
+    }
+
+    this.localStorageService.setObject(SWARM_SORTING, this.selectedSort);
+    this.sortSwarm();
+  }
+
+  private sortSwarm() {
+    this.swarm.sort((a, b) => {
+      let comparison = 0;
+      const aVal = a[this.selectedSort.sortField];
+      const bVal = b[this.selectedSort.sortField];
+      const fieldType = typeof aVal;
+
+      if (this.selectedSort.sortField === 'address') {
+        const aValue = aVal || '';
+        const bValue = bVal || '';
+        const aIsIp = this.isIpAddress(aValue);
+        const bIsIp = this.isIpAddress(bValue);
+
+        if (aIsIp && bIsIp) {
+          const aOctets = aValue.split('.').map(Number);
+          const bOctets = bValue.split('.').map(Number);
+          for (let i = 0; i < 4; i++) {
+            if (aOctets[i] !== bOctets[i]) {
+              comparison = aOctets[i] - bOctets[i];
+              break;
+            }
+          }
+        } else if (!aIsIp && !bIsIp) {
+          comparison = aValue.localeCompare(bValue);
+        } else {
+          comparison = aIsIp ? -1 : 1;
+        }
+      } else if (fieldType === 'number') {
+        comparison = (aVal || 0) - (bVal || 0);
+      } else if (fieldType === 'string') {
+        comparison = (aVal || '').localeCompare(bVal || '', undefined, { numeric: true });
+      }
+      return this.selectedSort.sortDirection === 'asc' ? comparison : -comparison;
+    });
+    this.recomputeViews();
+  }
+
+  private calculateTotals() {
+    this.totals.hashRate = this.swarm.reduce((sum, axe) => sum + (axe.hashRate || 0), 0);
+    this.totals.power = this.swarm.reduce((sum, axe) => sum + (axe.power || 0), 0);
+    this.totals.bestDiff = this.swarm.reduce((max, axe) => Math.max(max, axe.bestDiff || 0), 0);
+  }
+
+  private recomputeViews() {
+    const filter = this._filterText.toLowerCase();
+    this.filteredSwarm = !filter
+      ? this._swarm
+      : this._swarm.filter(axe =>
+          this.getDeviceDisplayName(axe).toLowerCase().includes(filter) ||
+          (axe.ASICModel || '').toLowerCase().includes(filter) ||
+          (axe.deviceModel || '').toLowerCase().includes(filter) ||
+          (axe.address || '').toLowerCase().includes(filter)
+        );
+
+    const families = new Map<string, any>();
+    for (const axe of this.filteredSwarm) {
+      if (!axe) continue;
+      const key = `${axe.deviceModel}|${axe.ASICModel}|${axe.asicCount}`;
+      if (!families.has(key)) families.set(key, axe);
+    }
+    this.deviceFamilies = [...families.values()];
+  }
+
+  private fallbackDeviceModel(data: any): any {
+    if (data.deviceModel && data.swarmColor && data.poolDifficulty && data.hashRate) return data;
+    const deviceModel = data.deviceModel || this.deriveDeviceModel(data);
+    const swarmColor = data.swarmColor || this.deriveSwarmColor(deviceModel);
+    const poolDifficulty = data.poolDifficulty || data.stratumDiff;
+    const hashRate = data.hashRate || data.hashRate_10m;
+    return { ...data, deviceModel, swarmColor, poolDifficulty, hashRate };
+  }
+
+  private numerizeDeviceBestDiffs(info: ISystemInfo) {
+    const parseAsNumber = (val: number | string): number => {
+      return typeof val === 'string' ? parseSuffixString(val) : val;
+    };
+
+    return {
+      bestDiff: parseAsNumber(info.bestDiff),
+      bestSessionDiff: parseAsNumber(info.bestSessionDiff),
+    };
+  }
+
+  private deriveDeviceModel(data: any): string {
+    if (data.boardVersion && data.boardVersion.length > 1) {
+      if (data.boardVersion[0] == "1" || data.boardVersion == "2.2") return "Max";
+      if (data.boardVersion[0] == "2" || data.boardVersion == "0.11") return "Ultra";
+      if (data.boardVersion[0] == "3") return "UltraHex";
+      if (data.boardVersion[0] == "4") return "Supra";
+      if (data.boardVersion[0] == "6") return "Gamma";
+      if (data.boardVersion[0] == "8") return "GammaTurbo";
+    }
+    return 'Other';
+  }
+
+  private deriveSwarmColor(deviceModel: string): string {
+    switch (deviceModel) {
+      case 'Max':        return 'red';
+      case 'Ultra':      return 'purple';
+      case 'Supra':      return 'blue';
+      case 'UltraHex':   return 'orange';
+      case 'Gamma':      return 'green';
+      case 'GammaTurbo': return 'cyan';
+      default:           return 'gray';
+    }
+  }
+
+  public stringifyDeviceLabel(data: any): string {
+    const model = data.deviceModel || 'Other';
+    const asicCountPart = data.asicCount > 1 ? data.asicCount + 'x ' : '';
+    const asicModel = data.ASICModel || '';
+
+    return model + ' (' + asicCountPart + asicModel + ')';
+  };
+
+
+  public toggleGridView(gridView: boolean): void {
+    this.localStorageService.setBool(SWARM_GRID_VIEW, this.gridView = gridView);
+  }
+
+  get sortOptions() {
+    return [
+      { label: 'Hostname', value: { sortField: 'hostname', sortDirection: 'desc' } },
+      { label: 'Hostname', value: { sortField: 'hostname', sortDirection: 'asc' } },
+      { label: 'Address', value: { sortField: 'address', sortDirection: 'desc' } },
+      { label: 'Address', value: { sortField: 'address', sortDirection: 'asc' } },
+      { label: 'Hashrate', value: { sortField: 'hashRate', sortDirection: 'desc' } },
+      { label: 'Hashrate', value: { sortField: 'hashRate', sortDirection: 'asc' } },
+      { label: 'Shares', value: { sortField: 'sharesAccepted', sortDirection: 'desc' } },
+      { label: 'Shares', value: { sortField: 'sharesAccepted', sortDirection: 'asc' } },
+      { label: 'Best Diff', value: { sortField: 'bestDiff', sortDirection: 'desc' } },
+      { label: 'Best Diff', value: { sortField: 'bestDiff', sortDirection: 'asc' } },
+      { label: 'Uptime', value: { sortField: 'uptimeSeconds', sortDirection: 'desc' } },
+      { label: 'Uptime', value: { sortField: 'uptimeSeconds', sortDirection: 'asc' } },
+      { label: 'Power', value: { sortField: 'power', sortDirection: 'desc' } },
+      { label: 'Power', value: { sortField: 'power', sortDirection: 'asc' } },
+      { label: 'Temp', value: { sortField: 'temp', sortDirection: 'desc' } },
+      { label: 'Temp', value: { sortField: 'temp', sortDirection: 'asc' } },
+      { label: 'Pool Diff', value: { sortField: 'poolDifficulty', sortDirection: 'desc' } },
+      { label: 'Pool Diff', value: { sortField: 'poolDifficulty', sortDirection: 'asc' } },
+      { label: 'Version', value: { sortField: 'version', sortDirection: 'desc' } },
+      { label: 'Version', value: { sortField: 'version', sortDirection: 'asc' } },
+    ];
+  }
+
+  onSortChange(event: {value: {sortField: string; sortDirection: 'asc' | 'desc'}}) {
+    const {sortField, sortDirection} = event.value;
+
+    this.sortBy(sortField, sortDirection);
+  }
+
+  getDeviceNotification(axe: any): { color: string; msg: string } | undefined {
+    switch (true) {
+      case !!axe.miningPaused:
+        return { color: 'yellow', msg: 'Paused' };
+      case axe.overheat_mode === 1:
+        return { color: 'red', msg: 'Overheated' };
+      case !!axe.power_fault:
+        return { color: 'red', msg: 'Power Fault' };
+      case !axe.frequency || axe.frequency < 400:
+        return { color: 'orange', msg: 'Frequency Low' };
+      case axe.isUsingFallbackStratum === 1:
+        return { color: 'orange', msg: 'Fallback Pool' };
+      case !!axe.showNewBlock:
+        return { color: 'green', msg: 'Block found' };
+      default:
+        return undefined;
+    }
+  }
+
+  isThisDevice(device: SwarmDevice): boolean {
+    const hostname = window.location.hostname;
+    
+    if (device.address === hostname || device.connectionAddress === hostname) {
+      return true;
+    }
+    
+    if (this.currentDeviceIp !== null && device['ipv4'] === this.currentDeviceIp) {
+      return true;
+    }
+    
+    return false;
+  }
+}

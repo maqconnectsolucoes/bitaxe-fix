@@ -1,0 +1,5 @@
+<div class="layout-footer" *ngIf="buildInfo">
+    <span class="text-xs opacity-60" title="Frontend build identifier">
+        Build {{ buildInfo.version }}<ng-container *ngIf="buildInfo.buildTime">&nbsp;&middot; {{ buildInfo.buildTime | date:'yyyy-MM-dd HH:mm:ss' }}</ng-container>
+    </span>
+</div>

@@ -1,0 +1,11 @@
+# Layout lido do aparelho em 2026-08-05 (TTGO T-Watch 2020 V1, flash 16MB).
+# Reproduz exatamente a tabela que estava gravada, para que um flash deste
+# projeto continue compatível com o backup em C:\bitaxe\T-Watch\firmware-backup.
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x5000,
+otadata,    data, ota,      0xe000,    0x2000,
+app0,       app,  ota_0,    0x10000,   0x640000,
+app1,       app,  ota_1,    0x650000,  0x640000,
+spiffs,     data, spiffs,   0xc90000,  0x360000,
+coredump,   data, coredump, 0xff0000,  0x10000,

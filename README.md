@@ -1,17 +1,14 @@
 # BitAxe-Fix
 
-Firmware corrigido do [ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) para mineradores **Bitaxe** (BM1366 / BM1368 / BM1370 Gamma), com 11 correções sobre a v2.15.1 oficial e telemetria por MQTT.
+Fork corrigido do [ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) para mineradores **Bitaxe** (BM1366 / BM1368 / BM1370 Gamma): 11 correções sobre a v2.15.1 oficial, mais telemetria por MQTT.
 
-**Site:** https://bitaxefix.maqconnectsolucoes.com.br/?de=github
-**Download:** [releases](../../releases/latest)
-
-> Este repositório distribui apenas os binários e as notas de versão. O firmware é derivado do ESP-Miner (GPL-3.0) — veja [Código-fonte](#código-fonte).
+**⬇️ [Baixar firmware](../../releases/latest)** · **🌐 [Site](https://bitaxefix.maqconnectsolucoes.com.br/?de=github)**
 
 ---
 
 ## A correção principal
 
-O ESP-Miner v2.15.1 introduziu uma regressão na validação de nonce que, com **version-rolling** ativo, fazia o firmware descartar shares válidas. O resultado é um Bitaxe que aparenta minerar normalmente — hashrate na tela, ASIC quente — mas com as shares aceitas caindo a zero na pool.
+O ESP-Miner v2.15.1 introduziu uma regressão na validação de nonce que, com **version-rolling** ativo, faz o firmware descartar shares válidas. O resultado é um Bitaxe que aparenta minerar normalmente — hashrate na tela, ASIC quente — enquanto as shares aceitas caem a zero na pool.
 
 É silencioso: não há mensagem de erro, e só se percebe olhando o painel da pool.
 
@@ -22,7 +19,7 @@ O ESP-Miner v2.15.1 introduziu uma regressão na validação de nonce que, com *
 | Correção | O que resolve |
 |---|---|
 | **Shares zeradas com version-rolling** | A regressão acima: shares válidas descartadas na validação de nonce |
-| **Envelope de tensão e frequência por ASIC** | O original aceitava qualquer valor via API — dava para aplicar tensão fora de faixa e danificar o chip |
+| **Envelope de tensão e frequência por ASIC** | O original aceita qualquer valor via API — dá para aplicar tensão fora de faixa e danificar o chip |
 | **Uso de memória liberada no Stratum** | Acesso a memória já liberada, causa de travamentos aleatórios |
 
 ### Estabilidade
@@ -31,7 +28,7 @@ O ESP-Miner v2.15.1 introduziu uma regressão na validação de nonce que, com *
 |---|---|
 | **Governador térmico gradual** | Redução suave de frequência no calor, em vez do corte abrupto |
 | **Throttle por queda de tensão de entrada** | Protege quando a fonte não sustenta a carga |
-| **Sensores mudos viram falha explícita** | Sensor sem resposta agora acusa erro em vez de reportar valor inválido |
+| **Sensores mudos viram falha explícita** | Sensor sem resposta acusa erro em vez de reportar valor inválido |
 
 ### Segurança
 
@@ -58,7 +55,7 @@ O ESP-Miner v2.15.1 introduziu uma regressão na validação de nonce que, com *
 
 Pela própria interface do Bitaxe, **sem cabo USB**:
 
-1. Baixe `esp-miner.bin` e `www.bin` da [release](../../releases/latest) e confira o SHA256 (abaixo)
+1. Baixe `esp-miner.bin` e `www.bin` da [release](../../releases/latest) e confira o SHA256
 2. No AxeOS, vá em **Settings → Firmware Update**
 3. Envie primeiro o **`www.bin`** (interface), depois o **`esp-miner.bin`** (firmware)
 4. Aguarde o reinício
@@ -70,15 +67,12 @@ A ordem importa: com a interface enviada primeiro, o novo firmware já encontra 
 ### Conferir o hash
 
 ```sh
-# Linux
-sha256sum esp-miner.bin www.bin
-
-# macOS
-shasum -a 256 esp-miner.bin www.bin
-
-# Windows
-certutil -hashfile esp-miner.bin SHA256
+sha256sum esp-miner.bin www.bin          # Linux
+shasum -a 256 esp-miner.bin www.bin      # macOS
+certutil -hashfile esp-miner.bin SHA256  # Windows
 ```
+
+Os hashes de cada versão estão nas [notas da release](../../releases/latest).
 
 ### Gravação por USB (recuperação)
 
@@ -95,27 +89,48 @@ esptool --port COM3 write-flash 0x10000 esp-miner.bin 0x410000 www.bin
 
 ---
 
+## Compilar
+
+Requer **ESP-IDF v5.5.x** e Node.js 22+ (o frontend Angular é compilado junto e embutido como `www.bin`).
+
+```sh
+. ~/esp/v5.5.1/esp-idf/export.sh
+git submodule update --init --recursive
+idf.py set-target esp32s3
+idf.py build
+```
+
+Saída: `build/esp-miner.bin` e `build/www.bin`.
+
+### Estrutura
+
+| Diretório | Conteúdo |
+|---|---|
+| `main/` | Aplicação: tarefas FreeRTOS, energia, térmica, servidor HTTP |
+| `main/http_server/axe-os/` | Interface web (Angular 19) |
+| `components/asic/` | Drivers por chip (BM1397/1366/1368/1370) |
+| `components/stratum/` | Stratum V1; `stratum_v2/` para o V2 |
+| `test/`, `test-ci/` | Testes Unity, executados em QEMU |
+
+---
+
 ## Compatibilidade
 
 **Testado em:** Bitaxe Gamma (BM1370, board 601)
 **Deve funcionar em:** BM1366, BM1368 e BM1370 — mesma família de ASIC suportada pelo ESP-Miner upstream.
 
-Requer ESP32-S3 com PSRAM octal (N16R8), que é o padrão dos Bitaxe.
+Requer ESP32-S3 com PSRAM octal (N16R8), o padrão dos Bitaxe.
 
 ## Voltar ao firmware oficial
 
 Baixe `esp-miner.bin` e `www.bin` das [releases do ESP-Miner](https://github.com/bitaxeorg/ESP-Miner/releases) e envie pelo mesmo procedimento.
 
-## Código-fonte
+## Licença
 
-O firmware é derivado do ESP-Miner, licenciado sob **GPL-3.0**.
-
-**Fonte correspondente a estes binários:** https://github.com/maqconnectsolucoes/bitaxe-fix-src
-
-Upstream oficial: https://github.com/bitaxeorg/ESP-Miner
+**GPL-3.0**, herdada do ESP-Miner. Veja [LICENSE](LICENSE).
 
 ## Aviso
 
 Software fornecido como está, sem garantia. Atualizar firmware envolve risco: uma queda de energia durante a gravação do `esp-miner.bin` deixa o aparelho com a versão anterior, mas uma queda durante a do `www.bin` pode deixar a interface inacessível — nesse caso, use a gravação por USB acima.
 
-Não sou afiliado ao projeto Bitaxe nem ao bitaxeorg.
+Não sou afiliado ao projeto Bitaxe nem ao bitaxeorg. O upstream oficial é https://github.com/bitaxeorg/ESP-Miner.

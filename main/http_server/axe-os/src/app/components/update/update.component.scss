@@ -1,0 +1,7 @@
+a {
+    color: var(--color-primary-text);
+}
+
+::ng-deep .instant-progress .p-progressbar-value {
+    transition: none !important;
+}

@@ -1,0 +1,11 @@
+h1, h2, h3, h4, h5, h6 {
+    color: var(--color-text-main) !important;
+}
+
+/* Global element borders */
+fieldset {
+    border-color: var(--color-border-content) !important;
+}
+table.border-1 {
+    border-color: var(--card-border) !important;
+}
