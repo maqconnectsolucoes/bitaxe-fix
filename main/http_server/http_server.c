@@ -1844,7 +1844,7 @@ esp_err_t start_rest_server(void * pvParameters)
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 8192;
     config.max_open_sockets = 20;
-    config.max_uri_handlers = 25;
+    config.max_uri_handlers = 32;
     config.close_fn = websocket_close_fn;
     config.lru_purge_enable = true;
     // Let the TCP stack detect and drop sockets held by clients that went away
@@ -2066,7 +2066,7 @@ esp_err_t start_rest_server(void * pvParameters)
             .handler = rest_common_get_handler, 
             .user_ctx = rest_context
         };
-        httpd_register_uri_handler(server, &common_get_uri);
+        ESP_ERROR_CHECK(httpd_register_uri_handler(server, &common_get_uri));
     }
 
     httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
